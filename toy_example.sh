@@ -54,6 +54,7 @@ python train.py \
     --max-seq-len 100 \
     --n-encoder-layers 3 \
     --n-decoder-layers 3
+    --cuda
 
 python translate.py \
     --input toy_example/data/raw/test.cz \

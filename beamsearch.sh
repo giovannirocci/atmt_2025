@@ -15,10 +15,10 @@ export XLA_FLAGS=--xla_gpu_cuda_data_dir=$CONDA_PREFIX/pkgs/cuda-toolkit
 # TRANSLATE
 python translate.py \
     --cuda \
-    --input cz-en/data/raw/test.cz \
-    --src-tokenizer cz-en/tokenizers/cz-bpe-8000.model \
-    --tgt-tokenizer cz-en/tokenizers/en-bpe-8000.model \
-    --checkpoint-path cz-en/checkpoints/checkpoint_best.pt \
-    --output cz-en/output.txt \
-    --max-len 300
+    --input ~data/atmt_2025/cz-en/data/raw/test.cz \
+    --src-tokenizer ~data/atmt_2025/cz-en/tokenizers/cz-bpe-8000.model \
+    --tgt-tokenizer ~data/atmt_2025/cz-en/tokenizers/en-bpe-8000.model \
+    --checkpoint-path ~data/atmt_2025/cz-en/checkpoints/checkpoint_best.pt \
+    --output ~data/a3/atmt_2025/Assignment\ 3/output-a3.txt \
+    --max-len 300 \
     --beam-size 5

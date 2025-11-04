@@ -28,6 +28,9 @@ def get_args():
     parser = argparse.ArgumentParser('Sequence to Sequence Model')
     parser.add_argument('--cuda', action='store_true', help='Use a GPU')
 
+    # Add the decoder arguments
+    parser.add_argument('--beam-size', default=1, type=int, help='beam size for beam search decoding')
+
     # Add data arguments
     parser.add_argument('--data', default='indomain/preprocessed_data/', help='path to data directory')
     parser.add_argument('--source-lang', default='fr', help='source language')
@@ -258,7 +261,8 @@ def validate(args, model, criterion, valid_dataset, epoch,
                                       max_out_len=args.max_length,
                                       tgt_tokenizer=tgt_tokenizer,
                                       args=args,
-                                      device=device)
+                                      device=device,
+                                      beam_size=args.beam_size)
 
         # Update tracked statistics
         stats['valid_loss'] += loss.item()
@@ -344,7 +348,8 @@ def evaluate(args, model, test_dataset,
                                       max_out_len=args.max_length,
                                       tgt_tokenizer=tgt_tokenizer,
                                       args=args,
-                                      device=device)
+                                      device=device,
+                                      beam_size=args.beam_size)
             #----------------------------------------
 
         # Collect hypotheses and references

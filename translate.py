@@ -31,6 +31,9 @@ def get_args():
     parser.add_argument('--cuda', action='store_true', help='Use a GPU')
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
 
+    # Add the decoder arguments
+    parser.add_argument('--beam-size', default=1, type=int, help='beam size for beam search decoding')
+
     # Add data arguments
     parser.add_argument('--input', required=True, help='Path to the raw text file to translate (one sentence per line)')
     parser.add_argument('--src-tokenizer', help='path to source sentencepiece tokenizer', required=True)
@@ -158,7 +161,8 @@ def main(args):
                                       max_out_len=args.max_len,
                                       tgt_tokenizer=tgt_tokenizer,
                                       args=args,
-                                      device=DEVICE)
+                                      device=DEVICE,
+                                      beam_size=args.beam_size)
             #----------------------------------------
 
         # Remove BOS and decode each sentence

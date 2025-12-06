@@ -1,153 +1,80 @@
 import torch
 import sentencepiece as spm
 from seq2seq.models import Seq2SeqModel
-from seq2seq.beam import BeamSearch, BeamSearchNode
-import torch.nn.functional as F
-
 
 def decode(model: Seq2SeqModel, src_tokens: torch.Tensor, src_pad_mask: torch.Tensor, max_out_len: int,
-           tgt_tokenizer: spm.SentencePieceProcessor, args, device: torch.device, beam_size: int = 1):
-    """Decodes a sequence without teacher forcing.
-
-    By default (beam_size=1) this uses greedy decoding (existing behaviour). If
-    beam_size > 1, performs per-sample beam search using the BeamSearch helpers.
-
-    Note: beam-search currently handles each example in the batch separately
-    (runs encoding once per example). This keeps the implementation simple and
-    avoids incremental-state machinery in the decoder.
-    """
+           tgt_tokenizer: spm.SentencePieceProcessor, args, device: torch.device):
+    """Decodes a sequence without teacher forcing. Works by relying on the model's own predictions, rather than the ground truth (trg_)"""
     batch_size = src_tokens.size(0)
     BOS = tgt_tokenizer.bos_id()
     EOS = tgt_tokenizer.eos_id()
     PAD = tgt_tokenizer.pad_id()
+    generated = torch.full((batch_size, 1), BOS, dtype=torch.long, device=device)
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    for t in range(max_out_len):
+        # Create target padding mask with correct batch dimension
+        max_len = model.decoder.pos_embed.size(1)
+        if generated.size(1) > max_len:
+            generated = generated[:, :max_len]
+        # Ensure trg_pad_mask has shape (batch_size, seq_len)
+        trg_pad_mask = (generated == PAD).unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, seq_len)
+        # Forward pass: use only the generated tokens so far
+        output = model(src_tokens, src_pad_mask, generated, trg_pad_mask).to(device)
+        # Get the logits for the last time step
+        next_token_logits = output[:, -1, :]  # last time step
+        next_tokens = next_token_logits.argmax(dim=-1, keepdim=True)  # greedy
 
-    # Fast path: greedy decoding (original behaviour)
-    if beam_size == 1:
-        generated = torch.full((batch_size, 1), BOS, dtype=torch.long, device=device)
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        for t in range(max_out_len):
-            # Create target padding mask with correct batch dimension
-            max_len = model.decoder.pos_embed.size(1)
-            if generated.size(1) > max_len:
-                generated = generated[:, :max_len]
-            trg_pad_mask = (generated == PAD).unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, seq_len)
-            # Forward pass: use only the generated tokens so far
-            output = model(src_tokens, src_pad_mask, generated, trg_pad_mask).to(device)
-            # Get the logits for the last time step
-            next_token_logits = output[:, -1, :]  # last time step
-            next_tokens = next_token_logits.argmax(dim=-1, keepdim=True)  # greedy
+        # Append next token to each sequence
+        generated = torch.cat([generated, next_tokens], dim=1)
 
-            # Append next token to each sequence
-            generated = torch.cat([generated, next_tokens], dim=1)
-
-            # Mark sequences as finished if EOS is generated
-            finished = finished | (next_tokens.squeeze(1) == EOS)
-            if finished.all():
-                break
-        # Remove initial BOS token and anything after EOS
-        predicted_tokens = []
-        for seq in generated[:, 1:].tolist():
-            if EOS in seq:
-                idx = seq.index(EOS)
-                seq = seq[:idx+1]
-            predicted_tokens.append(seq)
-        return predicted_tokens
-
-    # Beam search path (beam_size > 1)
-    predicted_batch = []
-
-    # We'll run beam search independently for each example in the batch.
-    for b in range(batch_size):
-        # Single example tensors
-        src_b = src_tokens[b : b + 1]
-        src_mask_b = src_pad_mask[b : b + 1]
-
-        # Run encoder once for this example
-        with torch.no_grad():
-            # The model.forward calls encoder then decoder; directly call encoder for beam search
-            encoder_out = model.encoder(src_b, src_mask_b)
-
-        beam = BeamSearch(beam_size=beam_size, max_len=max_out_len, pad=PAD)
-
-        # Create initial node with BOS
-        init_seq = torch.tensor([BOS], dtype=torch.long, device=device)
-        init_node = BeamSearchNode(search=None, emb=None, lstm_out=None, final_hidden=None,
-                                   final_cell=None, mask=None, sequence=init_seq, logProb=0.0, length=1)
-        # add initial node with its score (negative logprob)
-        beam.add(-init_node.eval(), init_node)
-
-        for t in range(max_out_len):
-            # collect current beams
-            current = beam.get_current_beams()
-            if len(current) == 0:
-                break
-
-            sequences = []
-            for _, node in current:
-                sequences.append(node.sequence.unsqueeze(0))  # (1, seq_len)
-            trg = torch.cat(sequences, dim=0).to(device)  # (num_beams, seq_len)
-
-            # ensure trg fits into decoder pos_embed
-            max_len = model.decoder.pos_embed.size(1)
-            if trg.size(1) > max_len:
-                trg = trg[:, :max_len]
-
-            trg_pad_mask = (trg == PAD).unsqueeze(1).unsqueeze(2)
-
-            # Expand encoder_out to match beam batch size
-            enc_expand = encoder_out.expand(trg.size(0), -1, -1)
-            src_mask_expand = src_mask_b.expand(trg.size(0), -1, -1, -1) if src_mask_b is not None else None
-
-            with torch.no_grad():
-                logits = model.decoder(enc_expand, src_mask_expand, trg, trg_pad_mask)
-                # take logits for last timestep for each beam
-                last_logits = logits[:, -1, :]
-                log_probs = F.log_softmax(last_logits, dim=-1)  # (num_beams, vocab)
-
-            # For each beam, expand to topk candidates
-            all_candidates = []  # tuples (score, node)
-            for beam_idx, (score_val, node) in enumerate(current):
-                node_logp = node.logp
-                lp = log_probs[beam_idx]  # (vocab,)
-                topk_logp, topk_idx = torch.topk(lp, k=min(beam_size, lp.size(0)))
-                for k in range(topk_idx.size(0)):
-                    token = int(topk_idx[k].item())
-                    token_logp = float(topk_logp[k].item())
-                    new_logp = node_logp + token_logp
-                    new_seq = torch.cat((node.sequence.cpu(), torch.tensor([token], dtype=torch.long)), dim=0)
-                    new_node = BeamSearchNode(search=None, emb=None, lstm_out=None, final_hidden=None,
-                                              final_cell=None, mask=None, sequence=new_seq, logProb=new_logp,
-                                              length=node.length + 1)
-                    # if token is EOS, add to final
-                    if token == EOS:
-                        beam.add_final(-new_node.eval(), new_node)
-                    else:
-                        all_candidates.append(( -new_node.eval(), new_node))
-
-            # add candidates to beam
-            for sc, nd in all_candidates:
-                beam.add(sc, nd)
-
-            # prune to keep only beam_size beams
-            try:
-                beam.prune()
-            except Exception:
-                # If there are fewer nodes than expected, ignore prune
-                pass
-
-            # stop early if we have enough final hypotheses
-            if beam.final.qsize() >= beam_size:
-                break
-
-        # pick best node
-        best_score, best_node = beam.get_best()
-        seq = best_node.sequence.tolist()
-        # Remove initial BOS and truncate after EOS
-        if len(seq) > 0 and seq[0] == BOS:
-            seq = seq[1:]
+        # Mark sequences as finished if EOS is generated
+        finished = finished | (next_tokens.squeeze(1) == EOS)
+        if finished.all():
+            break
+    # Remove initial BOS token and anything after EOS
+    predicted_tokens = []
+    for seq in generated[:, 1:].tolist():
         if EOS in seq:
             idx = seq.index(EOS)
-            seq = seq[: idx + 1]
-        predicted_batch.append(seq)
+            seq = seq[:idx+1]
+        predicted_tokens.append(seq)
+    return predicted_tokens
 
-    return predicted_batch
+def beam_search_decode(model: Seq2SeqModel, src_tokens: torch.Tensor, src_pad_mask: torch.Tensor, max_out_len: int,
+                       tgt_tokenizer: spm.SentencePieceProcessor, args, device: torch.device, beam_size: int = 5, alpha: float = 0.7):
+    """Beam Search decoding compatible with Transformer-based Seq2Seq models."""
+    model.eval()
+    BOS, EOS, PAD = tgt_tokenizer.bos_id(), tgt_tokenizer.eos_id(), tgt_tokenizer.pad_id()
+    # __QUESTION 1: what does this line set up and why is the beam represented this way?
+    beams = [(torch.tensor([[BOS]], device=device), 0.0)]
+    for _ in range(max_out_len):
+        new_beams = []
+        for seq, score in beams:
+            if seq[0, -1].item() == EOS:
+                new_beams.append((seq, score))
+                continue
+            with torch.no_grad():
+                max_len = model.decoder.pos_embed.size(1)
+                if seq.size(1) > max_len:
+                    seq = seq[:, :max_len]
+                # __QUESTION 2: Why do we need to create trg_pad_mask here and how does it affect the model's predictions?
+                trg_pad_mask = (seq == PAD)[:, None, None, :]
+                logits = model(src_tokens, src_pad_mask, seq, trg_pad_mask)[:, -1, :]
+                # __QUESTION 3: Explain the purpose of applying log_softmax and selecting top-k tokens here.
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                topk_log_probs, topk_ids = log_probs.topk(beam_size, dim=-1)
+
+            for k in range(beam_size):
+                # __QUESTION 4: explain the tensor shapes and the logic when creating new_seq and new_score below. Is any broadcasting or indexing issue possible?
+                new_seq = torch.cat([seq, topk_ids[:, k].unsqueeze(0)], dim=1)
+                new_score = score + topk_log_probs[:, k].item()
+                new_beams.append((new_seq, new_score))
+
+        beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_size]
+        # __QUESTION 5: Why do we check for EOS here and what does it imply for beam search?
+        if all(seq[0, -1].item() == EOS for seq, _ in beams):
+            break
+    best_seq, _ = beams[0]
+    # __QUESTION 6: What is returned, and why are we squeezing, converting to list and wrapping in another list here?
+    return [best_seq.squeeze(0).tolist()]
+

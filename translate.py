@@ -13,7 +13,7 @@ from torch.serialization import default_restore_location
 import sys
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-from seq2seq.decode import beam_search_decode, decode
+from seq2seq.decode import beam_search_decode, decode, beam_search_decode_maximum_candidate, beam_search_decode_relative_pruning
 from seq2seq.data.tokenizer import BPETokenizer
 from seq2seq import models, utils
 from seq2seq.data.dataset import Seq2SeqDataset, BatchSampler
@@ -42,6 +42,10 @@ def get_args():
     # Beam search decoding parameters
     parser.add_argument('--beam-size', default=5, type=int, help='beam size for beam search decoding')
     parser.add_argument('--alpha', default=0.7, type=float, help='length normalization hyperparameter for beam search')
+    parser.add_argument('--relative_pruning', action='store_true', help='Enable relative pruning in beam search')
+    parser.add_argument('--rp_beta', type=float, default=0.3, help='relative pruning beta value')
+    parser.add_argument('--maximum_candidates', action='store_true', help='maximum candidates to keep after pruning')
+    parser.add_argument('--mc_size', type=int, default=20, help='maximum candidates size for maximum candidate pruning')
     # BLEU computation arguments
     parser.add_argument('--bleu', action='store_true', help='If set, compute BLEU score after translation')
     parser.add_argument('--reference', type=str, help='Path to the reference file (one sentence per line, required if --bleu is set)')
@@ -163,15 +167,44 @@ def main(args):
                                       args=args,
                                       device=DEVICE)
             else:
-                prediction = beam_search_decode(model=model,
-                                              src_tokens=src_tokens,
-                                              src_pad_mask=src_pad_mask,
-                                              max_out_len=args.max_len,
-                                              tgt_tokenizer=tgt_tokenizer,
-                                              args=args,
-                                              device=DEVICE,
-                                              beam_size=args.beam_size,
-                                              alpha=args.alpha)
+                if args.relative_pruning:
+                    prediction = beam_search_decode_relative_pruning(
+                        model=model,
+                        src_tokens=src_tokens,
+                        src_pad_mask=src_pad_mask,
+                        max_out_len=args.max_len,
+                        tgt_tokenizer=tgt_tokenizer,
+                        args=args,
+                        device=DEVICE,
+                        beam_size=args.beam_size,
+                        alpha=args.alpha,
+                        rp=args.rp_beta  # Changed from beta to rp
+                    )
+                elif args.maximum_candidates:
+                    prediction = beam_search_decode_maximum_candidate(
+                        model=model,
+                        src_tokens=src_tokens,
+                        src_pad_mask=src_pad_mask,
+                        max_out_len=args.max_len,
+                        tgt_tokenizer=tgt_tokenizer,
+                        args=args,
+                        device=DEVICE,
+                        beam_size=args.beam_size,
+                        alpha=args.alpha,
+                        mc=args.mc_size  # Changed from max_candidates to mc
+                    )
+                else:
+                    prediction = beam_search_decode(
+                        model=model,
+                        src_tokens=src_tokens,
+                        src_pad_mask=src_pad_mask,
+                        max_out_len=args.max_len,
+                        tgt_tokenizer=tgt_tokenizer,
+                        args=args,
+                        device=DEVICE,
+                        beam_size=args.beam_size,
+                        alpha=args.alpha
+                    )
             #----------------------------------------
 
         # Remove BOS and decode each sentence

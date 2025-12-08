@@ -11,6 +11,11 @@ def decode(model: Seq2SeqModel, src_tokens: torch.Tensor, src_pad_mask: torch.Te
     PAD = tgt_tokenizer.pad_id()
     generated = torch.full((batch_size, 1), BOS, dtype=torch.long, device=device)
     finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    
+    # Encode the source sentence once, outside of generated loop
+    with torch.no_grad():
+        encoded_src = model.encoder(src_tokens, src_pad_mask)
+        
     for t in range(max_out_len):
         # Create target padding mask with correct batch dimension
         max_len = model.decoder.pos_embed.size(1)
@@ -18,8 +23,11 @@ def decode(model: Seq2SeqModel, src_tokens: torch.Tensor, src_pad_mask: torch.Te
             generated = generated[:, :max_len]
         # Ensure trg_pad_mask has shape (batch_size, seq_len)
         trg_pad_mask = (generated == PAD).unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, seq_len)
+        
         # Forward pass: use only the generated tokens so far
-        output = model(src_tokens, src_pad_mask, generated, trg_pad_mask).to(device)
+        # decode the output
+        output = model.decoder(encoded_src, src_pad_mask, generated, trg_pad_mask).to(device)
+        
         # Get the logits for the last time step
         next_token_logits = output[:, -1, :]  # last time step
         next_tokens = next_token_logits.argmax(dim=-1, keepdim=True)  # greedy
@@ -47,6 +55,11 @@ def beam_search_decode(model: Seq2SeqModel, src_tokens: torch.Tensor, src_pad_ma
     BOS, EOS, PAD = tgt_tokenizer.bos_id(), tgt_tokenizer.eos_id(), tgt_tokenizer.pad_id()
     # __QUESTION 1: what does this line set up and why is the beam represented this way?
     beams = [(torch.tensor([[BOS]], device=device), 0.0)]
+
+    # Encode the source sentence once, outside of generated loop
+    with torch.no_grad():
+        encoded_src = model.encoder(src_tokens, src_pad_mask)
+
     for _ in range(max_out_len):
         new_beams = []
         for seq, score in beams:
@@ -59,7 +72,10 @@ def beam_search_decode(model: Seq2SeqModel, src_tokens: torch.Tensor, src_pad_ma
                     seq = seq[:, :max_len]
                 # __QUESTION 2: Why do we need to create trg_pad_mask here and how does it affect the model's predictions?
                 trg_pad_mask = (seq == PAD)[:, None, None, :]
-                logits = model(src_tokens, src_pad_mask, seq, trg_pad_mask)[:, -1, :]
+                
+                # decode the last newly generated token, using encoded source and previous generated tokens
+                logits = model.decoder(encoded_src, src_pad_mask, seq, trg_pad_mask)[:, -1, :]
+                
                 # __QUESTION 3: Explain the purpose of applying log_softmax and selecting top-k tokens here.
                 log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
                 topk_log_probs, topk_ids = log_probs.topk(beam_size, dim=-1)

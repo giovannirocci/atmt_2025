@@ -24,4 +24,5 @@ toy_example/toy_example_output.en
 # unused
 seq2seq/embedding_saver.py
 
-.vscode
+.vscode.DS_Store
+.DS_Store
